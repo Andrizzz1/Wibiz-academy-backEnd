@@ -240,11 +240,17 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
       [user.id]
     );
 
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET as string,
-      { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
-    );
+    const jwtSecret = process.env.JWT_SECRET;
+
+      if (!jwtSecret) {
+        throw new Error("JWT_SECRET is not set");
+      }
+
+      const token = jwt.sign(
+        { userId: user.id, email: user.email, role: user.role },
+        jwtSecret,
+        { expiresIn: "7d" }
+      );
 
     return res.status(200).json({
       message: "Login successful",
