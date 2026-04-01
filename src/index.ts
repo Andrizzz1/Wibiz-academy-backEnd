@@ -384,29 +384,40 @@ app.get(
       const user = result.rows[0];
 
       // Phase 1: placeholder modules — real content is Phase 2+
-      const modules = [
-        {
-          id: "module-001",
-          title: "Welcome to WiBiz Academy",
-          status: "available",
-          progress: 0,
-          locked: false,
-        },
-        {
-          id: "module-002",
-          title: "Business Systems Foundations",
-          status: "locked",
-          progress: 0,
-          locked: true,
-        },
-        {
-          id: "module-003",
-          title: "GHL Mastery — Core Workflows",
-          status: "locked",
-          progress: 0,
-          locked: true,
-        },
-      ];
+      const progressResult = await pool.query(
+  `SELECT module_key, progress_percent, status, completed_at
+   FROM module_progress
+   WHERE user_id = $1`,
+  [req.user!.userId]
+);
+
+const progressMap = new Map(
+  progressResult.rows.map((row) => [row.module_key, row])
+);
+
+  const modules = [
+    {
+      id: "module-1",
+      title: "Welcome to WiBiz Academy",
+      status: progressMap.get("module-1")?.status || "available",
+      progress: progressMap.get("module-1")?.progress_percent || 0,
+      locked: (progressMap.get("module-1")?.status || "available") === "locked",
+    },
+    {
+      id: "module-2",
+      title: "Business Systems Foundations",
+      status: progressMap.get("module-2")?.status || "locked",
+      progress: progressMap.get("module-2")?.progress_percent || 0,
+      locked: (progressMap.get("module-2")?.status || "locked") === "locked",
+    },
+    {
+      id: "module-3",
+      title: "GHL Mastery — Core Workflows",
+      status: progressMap.get("module-3")?.status || "locked",
+      progress: progressMap.get("module-3")?.progress_percent || 0,
+      locked: (progressMap.get("module-3")?.status || "locked") === "locked",
+    },
+  ];
 
       return res.status(200).json({
         user: {
@@ -551,7 +562,7 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
     const userId = req.user!.userId;
 
     const result = await pool.query(
-      `SELECT id, email, first_name, last_name, ghl_contact_id
+      `SELECT id, email, ghl_contact_id
        FROM users
        WHERE id = $1
        LIMIT 1`,
@@ -564,29 +575,60 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
 
     const user = result.rows[0];
 
-    // TEMP success route for frontend wiring
-    // Real GHL sync will be added after we get the correct GHL API key
+    await pool.query("BEGIN");
+
     await pool.query(
-      `INSERT INTO sync_events (entity_type, entity_id, event_type, payload_json, status)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO module_progress (user_id, module_key, progress_percent, status, completed_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (user_id, module_key)
+       DO UPDATE SET
+         progress_percent = EXCLUDED.progress_percent,
+         status = EXCLUDED.status,
+         completed_at = EXCLUDED.completed_at,
+         updated_at = NOW()`,
+      [user.id, "module-1", 100, "completed"]
+    );
+
+    await pool.query(
+      `INSERT INTO module_progress (user_id, module_key, progress_percent, status, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (user_id, module_key)
+       DO UPDATE SET
+         status = EXCLUDED.status,
+         updated_at = NOW()`,
+      [user.id, "module-2", 0, "available"]
+    );
+
+    await pool.query(
+      `INSERT INTO sync_events (
+        entity_type,
+        entity_id,
+        event_type,
+        payload_json,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5)`,
       [
         "user",
         user.id,
         "module_1_completed",
         {
+          module: "module-1",
           email: user.email,
-          ghl_contact_id: user.ghl_contact_id,
-          module: "module-1"
+          ghl_contact_id: user.ghl_contact_id || null
         },
         "success"
       ]
     );
+
+    await pool.query("COMMIT");
 
     return res.status(200).json({
       message: "Module 1 completion recorded successfully",
       userId: user.id
     });
   } catch (error) {
+    await pool.query("ROLLBACK").catch(() => {});
     console.error("Module 1 complete error:", error);
     return res.status(500).json({ error: "Failed to complete module 1" });
   }
