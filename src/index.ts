@@ -64,6 +64,45 @@ function requireAuth(roles: string[] = []) {
   };
 }
 
+
+
+
+async function ghlRequest(path: string, options: RequestInit = {}) {
+  const response = await fetch(`https://services.leadconnectorhq.com${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${process.env.GHL_API_KEY}`,
+      Version: "2021-07-28",
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  const text = await response.text();
+  let data: any = null;
+
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+
+  if (!response.ok) {
+    throw new Error(`GHL request failed: ${response.status} ${response.statusText} - ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+async function addTagToContact(contactId: string, tag: string) {
+  return ghlRequest(`/contacts/${contactId}/tags`, {
+    method: "POST",
+    body: JSON.stringify({
+      tags: [tag],
+    }),
+  });
+}
 // ─────────────────────────────────────────────
 // HEALTH
 // ─────────────────────────────────────────────
@@ -622,7 +661,9 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
     );
 
     await pool.query("COMMIT");
-
+      if (user.ghl_contact_id) {
+      await addTagToContact(user.ghl_contact_id, "module1_complete");
+    }
     return res.status(200).json({
       message: "Module 1 completion recorded successfully",
       userId: user.id
@@ -699,7 +740,9 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
     );
 
     await pool.query("COMMIT");
-
+    if (user.ghl_contact_id) {
+      await addTagToContact(user.ghl_contact_id, "module2_complete");
+    }
     return res.status(200).json({
       message: "Module 2 completion recorded successfully",
       userId: user.id
@@ -765,7 +808,9 @@ app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthReque
     );
 
     await pool.query("COMMIT");
-
+    if (user.ghl_contact_id) {
+      await addTagToContact(user.ghl_contact_id, "module3_complete");
+    }
     return res.status(200).json({
       message: "Module 3 completion recorded successfully",
       userId: user.id
