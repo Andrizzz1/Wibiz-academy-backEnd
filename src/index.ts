@@ -546,6 +546,52 @@ app.get("/api/team", requireAuth(), async (req: AuthRequest, res: Response) => {
   }
 });
 
+app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.userId;
+
+    const result = await pool.query(
+      `SELECT id, email, first_name, last_name, ghl_contact_id
+       FROM users
+       WHERE id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = result.rows[0];
+
+    // TEMP success route for frontend wiring
+    // Real GHL sync will be added after we get the correct GHL API key
+    await pool.query(
+      `INSERT INTO sync_events (entity_type, entity_id, event_type, payload_json, status)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        "user",
+        user.id,
+        "module_1_completed",
+        {
+          email: user.email,
+          ghl_contact_id: user.ghl_contact_id,
+          module: "module-1"
+        },
+        "success"
+      ]
+    );
+
+    return res.status(200).json({
+      message: "Module 1 completion recorded successfully",
+      userId: user.id
+    });
+  } catch (error) {
+    console.error("Module 1 complete error:", error);
+    return res.status(500).json({ error: "Failed to complete module 1" });
+  }
+});
+
 app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response) => {
   try {
     const secret = req.header("x-wibiz-secret");
