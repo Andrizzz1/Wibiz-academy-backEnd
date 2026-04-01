@@ -546,6 +546,144 @@ app.get("/api/team", requireAuth(), async (req: AuthRequest, res: Response) => {
   }
 });
 
+app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response) => {
+  try {
+    const secret = req.header("x-wibiz-secret");
+
+    if (!secret || secret !== process.env.GHL_WEBHOOK_SECRET) {
+      return res.status(401).json({ error: "Invalid webhook secret" });
+    }
+
+    const {
+      contactId,
+      opportunityId,
+      stageId,
+      stageName,
+      email,
+      firstName,
+      lastName,
+      enrollmentFee,
+      monthlyFee,
+      locationId,
+      planTier,
+    } = req.body || {};
+
+    if (!contactId || !email) {
+      return res.status(400).json({ error: "contactId and email are required" });
+    }
+
+    // fallback defaults for now
+    const finalPlanTier = planTier || "lite";
+    const finalLocationId = locationId || "default-location";
+    const temporaryPass = "TempPass123!";
+
+    const existing = await pool.query(
+      `SELECT id FROM users WHERE ghl_contact_id = $1 LIMIT 1`,
+      [contactId]
+    );
+
+    let userId: string;
+    let created = false;
+
+    if (existing.rows.length === 0) {
+      const passwordHash = await bcrypt.hash(temporaryPass, 10);
+
+      const result = await pool.query(
+        `INSERT INTO users (
+          email,
+          password_hash,
+          role,
+          ghl_contact_id,
+          ghl_location_id,
+          plan_tier,
+          vertical,
+          hskd_required,
+          first_name,
+          last_name,
+          activated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+        RETURNING id`,
+        [
+          email,
+          passwordHash,
+          "client_admin",
+          contactId,
+          finalLocationId,
+          finalPlanTier,
+          "business",
+          false,
+          firstName || "",
+          lastName || "",
+        ]
+      );
+
+      userId = result.rows[0].id;
+      created = true;
+    } else {
+      userId = existing.rows[0].id;
+
+      await pool.query(
+        `UPDATE users
+         SET email = $1,
+             first_name = $2,
+             last_name = $3,
+             plan_tier = $4,
+             ghl_location_id = $5,
+             updated_at = NOW()
+         WHERE id = $6`,
+        [
+          email,
+          firstName || "",
+          lastName || "",
+          finalPlanTier,
+          finalLocationId,
+          userId,
+        ]
+      );
+    }
+
+    await pool.query(
+      `INSERT INTO sync_events (
+        entity_type,
+        entity_id,
+        event_type,
+        payload_json,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5)`,
+      [
+        "user",
+        userId,
+        "ghl_payment_success",
+        {
+          contactId,
+          opportunityId,
+          stageId,
+          stageName,
+          email,
+          firstName,
+          lastName,
+          enrollmentFee,
+          monthlyFee,
+          locationId: finalLocationId,
+          planTier: finalPlanTier,
+        },
+        "success",
+      ]
+    );
+
+    return res.status(200).json({
+      message: created ? "User created from payment workflow" : "User updated from payment workflow",
+      userId,
+      created,
+    });
+  } catch (error) {
+    console.error("Payment webhook error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // ─────────────────────────────────────────────
 // SERVER START
 // ─────────────────────────────────────────────
