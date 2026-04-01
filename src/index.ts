@@ -663,6 +663,7 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
     await pool.query("COMMIT");
       if (user.ghl_contact_id) {
       await addTagToContact(user.ghl_contact_id, "module1_complete");
+      console.log("Tagging contact:", user.ghl_contact_id);
     }
     return res.status(200).json({
       message: "Module 1 completion recorded successfully",
