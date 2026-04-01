@@ -710,7 +710,72 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
     return res.status(500).json({ error: "Failed to complete module 2" });
   }
 });
+app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.userId;
 
+    const result = await pool.query(
+      `SELECT id, email, ghl_contact_id
+       FROM users
+       WHERE id = $1
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = result.rows[0];
+
+    await pool.query("BEGIN");
+
+    await pool.query(
+      `INSERT INTO module_progress (user_id, module_key, progress_percent, status, completed_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (user_id, module_key)
+       DO UPDATE SET
+         progress_percent = EXCLUDED.progress_percent,
+         status = EXCLUDED.status,
+         completed_at = EXCLUDED.completed_at,
+         updated_at = NOW()`,
+      [user.id, "module-3", 100, "completed"]
+    );
+
+    await pool.query(
+      `INSERT INTO sync_events (
+        entity_type,
+        entity_id,
+        event_type,
+        payload_json,
+        status
+      )
+      VALUES ($1, $2, $3, $4, $5)`,
+      [
+        "user",
+        user.id,
+        "module_3_completed",
+        {
+          module: "module-3",
+          email: user.email,
+          ghl_contact_id: user.ghl_contact_id || null
+        },
+        "success"
+      ]
+    );
+
+    await pool.query("COMMIT");
+
+    return res.status(200).json({
+      message: "Module 3 completion recorded successfully",
+      userId: user.id
+    });
+  } catch (error) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("Module 3 complete error:", error);
+    return res.status(500).json({ error: "Failed to complete module 3" });
+  }
+});
 app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response) => {
   try {
     const secret = req.header("x-wibiz-secret");
