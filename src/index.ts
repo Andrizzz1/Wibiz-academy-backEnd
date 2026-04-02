@@ -660,11 +660,16 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
       ]
     );
 
-    await pool.query("COMMIT");
-      if (user.ghl_contact_id) {
-      await addTagToContact(user.ghl_contact_id, "module1_complete");
-      console.log("Tagging contact:", user.ghl_contact_id);
+   await pool.query("COMMIT");
+    if (user.ghl_contact_id) {
+      try {
+        console.log("Tagging contact:", user.ghl_contact_id);
+        await addTagToContact(user.ghl_contact_id, "module1_complete");
+      } catch (err) {
+        console.error("GHL tag error:", err);
+      }
     }
+
     return res.status(200).json({
       message: "Module 1 completion recorded successfully",
       userId: user.id
@@ -740,10 +745,17 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
       ]
     );
 
-    await pool.query("COMMIT");
+   await pool.query("COMMIT");
+
     if (user.ghl_contact_id) {
-      await addTagToContact(user.ghl_contact_id, "module2_complete");
+      try {
+        console.log("Tagging contact:", user.ghl_contact_id);
+        await addTagToContact(user.ghl_contact_id, "module2_complete");
+      } catch (err) {
+        console.error("GHL tag error:", err);
+      }
     }
+
     return res.status(200).json({
       message: "Module 2 completion recorded successfully",
       userId: user.id
@@ -809,9 +821,16 @@ app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthReque
     );
 
     await pool.query("COMMIT");
+
     if (user.ghl_contact_id) {
-      await addTagToContact(user.ghl_contact_id, "module3_complete");
+      try {
+        console.log("Tagging contact:", user.ghl_contact_id);
+        await addTagToContact(user.ghl_contact_id, "module3_complete");
+      } catch (err) {
+        console.error("GHL tag error:", err);
+      }
     }
+
     return res.status(200).json({
       message: "Module 3 completion recorded successfully",
       userId: user.id
