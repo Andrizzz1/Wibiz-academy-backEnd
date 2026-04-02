@@ -749,7 +749,9 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
 
     if (user.ghl_contact_id) {
       try {
+        console.log("Adding tag: module2_complete");
         console.log("Tagging contact:", user.ghl_contact_id);
+        console.log("Adding tag: module2_complete");
         await addTagToContact(user.ghl_contact_id, "module2_complete");
       } catch (err) {
         console.error("GHL tag error:", err);
@@ -824,7 +826,9 @@ app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthReque
 
     if (user.ghl_contact_id) {
       try {
+        console.log("MODULE 3 ROUTE HIT");
         console.log("Tagging contact:", user.ghl_contact_id);
+        console.log("Adding tag: module3_complete");
         await addTagToContact(user.ghl_contact_id, "module3_complete");
       } catch (err) {
         console.error("GHL tag error:", err);
