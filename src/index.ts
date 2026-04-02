@@ -103,6 +103,17 @@ async function addTagToContact(contactId: string, tag: string) {
     }),
   });
 }
+
+async function updateContactCustomFields(contactId: string, fields: any[]) {
+  return ghlRequest(`/contacts/${contactId}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      customFields: fields,
+    }),
+  });
+}
+
+
 // ─────────────────────────────────────────────
 // HEALTH
 // ─────────────────────────────────────────────
@@ -660,15 +671,31 @@ app.post("/api/progress/module-1/complete", requireAuth(), async (req: AuthReque
       ]
     );
 
-   await pool.query("COMMIT");
-    if (user.ghl_contact_id) {
-      try {
-        console.log("Tagging contact:", user.ghl_contact_id);
-        await addTagToContact(user.ghl_contact_id, "module1_complete");
-      } catch (err) {
-        console.error("GHL tag error:", err);
-      }
+  await pool.query("COMMIT");
+
+  if (user.ghl_contact_id) {
+    try {
+      console.log("Tagging contact:", user.ghl_contact_id);
+      await addTagToContact(user.ghl_contact_id, "module1_complete");
+
+      await updateContactCustomFields(user.ghl_contact_id, [
+        {
+          key: "universe_module_1_status",
+          value: "completed"
+        },
+        {
+          key: "universe_last_completed_module",
+          value: "module-1"
+        },
+        {
+          key: "universe_progress_percent",
+          value: 33
+        }
+      ]);
+    } catch (err) {
+      console.error("GHL sync error:", String(err));
     }
+  }
 
     return res.status(200).json({
       message: "Module 1 completion recorded successfully",
@@ -982,6 +1009,8 @@ app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response
     return res.status(500).json({ error: "Internal server error" });
   }
 });
+
+
 
 // ─────────────────────────────────────────────
 // SERVER START
