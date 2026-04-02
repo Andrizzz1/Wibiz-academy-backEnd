@@ -780,6 +780,21 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
         console.log("Tagging contact:", user.ghl_contact_id);
         console.log("Adding tag: module2_complete");
         await addTagToContact(user.ghl_contact_id, "module2_complete");
+
+        await updateContactCustomFields(user.ghl_contact_id, [
+          {
+            key: "universe_module_2_status",
+            value: "completed"
+          },
+          {
+            key: "universe_last_completed_module",
+            value: "module-2"
+          },
+          {
+            key: "universe_progress_percent",
+            value: 67
+          }
+        ]);
       } catch (err) {
         console.error("GHL tag error:", err);
       }
@@ -857,6 +872,21 @@ app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthReque
         console.log("Tagging contact:", user.ghl_contact_id);
         console.log("Adding tag: module3_complete");
         await addTagToContact(user.ghl_contact_id, "module3_complete");
+
+        await updateContactCustomFields(user.ghl_contact_id, [
+          {
+            key: "universe_module_3_status",
+            value: "completed"
+          },
+          {
+            key: "universe_last_completed_module",
+            value: "module-3"
+          },
+          {
+            key: "universe_progress_percent",
+            value: 100
+          }
+        ]);
       } catch (err) {
         console.error("GHL tag error:", err);
       }
