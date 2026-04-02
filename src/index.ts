@@ -749,7 +749,7 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
 
     if (user.ghl_contact_id) {
       try {
-        console.log("Adding tag: module2_complete");
+        console.log("MODULE 2 ROUTE HIT");
         console.log("Tagging contact:", user.ghl_contact_id);
         console.log("Adding tag: module2_complete");
         await addTagToContact(user.ghl_contact_id, "module2_complete");
