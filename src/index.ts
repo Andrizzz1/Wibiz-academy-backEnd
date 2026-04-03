@@ -10,6 +10,9 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
+
+console.log("GHL location:", process.env.GHL_LOCATION_ID);
+console.log("GHL token loaded:", !!process.env.GHL_API_KEY);
 app.use(cors());
 app.use(express.json());
 
@@ -113,6 +116,155 @@ async function updateContactCustomFields(contactId: string, fields: any[]) {
   });
 }
 
+function normalizePlanTier(value: string | undefined | null): string | null {
+  if (!value) return null;
+
+  const v = String(value).trim().toLowerCase();
+
+  if (["lite", "starter"].includes(v)) return "lite";
+  if (["standard", "growth"].includes(v)) return "standard";
+  if (["pro", "premium"].includes(v)) return "pro";
+
+  return v || null;
+}
+
+function randomTempPassword(length = 16) {
+  const chars =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*";
+  let out = "";
+  for (let i = 0; i < length; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+async function upsertUserFromGhl(payload: {
+  contactId: string;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  locationId?: string;
+  planTier?: string | null;
+  vertical?: string | null;
+  hskdRequired?: boolean;
+  sourceEvent: string;
+  rawPayload: any;
+}) {
+  const {
+    contactId,
+    email,
+    firstName,
+    lastName,
+    locationId,
+    planTier,
+    vertical,
+    hskdRequired,
+    sourceEvent,
+    rawPayload,
+  } = payload;
+
+  const finalPlanTier = normalizePlanTier(planTier);
+  const finalLocationId = locationId || process.env.GHL_LOCATION_ID || null;
+
+  if (!finalLocationId) {
+    throw new Error("Missing location id for user sync");
+  }
+
+  const existing = await pool.query(
+    `SELECT id FROM users WHERE ghl_contact_id = $1 LIMIT 1`,
+    [contactId]
+  );
+
+  let userId: string;
+  let created = false;
+  let tempPassword: string | null = null;
+
+  if (existing.rows.length === 0) {
+    tempPassword = randomTempPassword();
+    const passwordHash = await bcrypt.hash(tempPassword, 10);
+
+    const result = await pool.query(
+      `INSERT INTO users (
+        email,
+        password_hash,
+        role,
+        ghl_contact_id,
+        ghl_location_id,
+        plan_tier,
+        vertical,
+        hskd_required,
+        first_name,
+        last_name,
+        is_active,
+        activated_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW(),NOW())
+      RETURNING id`,
+      [
+        email.toLowerCase().trim(),
+        passwordHash,
+        "client_admin",
+        contactId,
+        finalLocationId,
+        finalPlanTier,
+        vertical || null,
+        hskdRequired ?? false,
+        firstName || "",
+        lastName || "",
+        true,
+      ]
+    );
+
+    userId = result.rows[0].id;
+    created = true;
+  } else {
+    userId = existing.rows[0].id;
+
+    await pool.query(
+      `UPDATE users
+       SET email = $1,
+           first_name = $2,
+           last_name = $3,
+           ghl_location_id = $4,
+           plan_tier = $5,
+           vertical = $6,
+           hskd_required = $7,
+           is_active = true,
+           updated_at = NOW()
+       WHERE id = $8`,
+      [
+        email.toLowerCase().trim(),
+        firstName || "",
+        lastName || "",
+        finalLocationId,
+        finalPlanTier,
+        vertical || null,
+        hskdRequired ?? false,
+        userId,
+      ]
+    );
+  }
+
+  await pool.query(
+    `INSERT INTO sync_events (
+      entity_type,
+      entity_id,
+      event_type,
+      payload_json,
+      status
+    )
+    VALUES ($1,$2,$3,$4,$5)`,
+    ["user", userId, sourceEvent, rawPayload, "success"]
+  );
+
+  return {
+    userId,
+    created,
+    tempPassword,
+  };
+}
 
 // ─────────────────────────────────────────────
 // HEALTH
@@ -133,7 +285,6 @@ app.post("/api/webhooks/ghl/provision", async (req: Request, res: Response) => {
 
   try {
     const secret = req.header("x-wibiz-secret");
-
     if (!secret || secret !== process.env.GHL_WEBHOOK_SECRET) {
       return res.status(401).json({ error: "Invalid webhook secret" });
     }
@@ -146,15 +297,13 @@ app.post("/api/webhooks/ghl/provision", async (req: Request, res: Response) => {
       plan_tier,
       vertical,
       hskd_required,
-      temporary_pass,
       location_id,
     } = req.body || {};
 
-    if (!contact_id || !email || !temporary_pass) {
+    if (!contact_id || !email) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Log raw payload first — capture returned id to avoid race condition on update
     const logResult = await pool.query(
       `INSERT INTO webhook_log (source, raw_payload, processed)
        VALUES ($1, $2, $3)
@@ -163,82 +312,32 @@ app.post("/api/webhooks/ghl/provision", async (req: Request, res: Response) => {
     );
     webhookLogId = logResult.rows[0].id;
 
-    // Idempotency — check if user already exists
-    const existing = await pool.query(
-      `SELECT id FROM users WHERE ghl_contact_id = $1`,
-      [contact_id]
-    );
+    const result = await upsertUserFromGhl({
+      contactId: contact_id,
+      email,
+      firstName: first_name,
+      lastName: last_name,
+      locationId: location_id,
+      planTier: plan_tier,
+      vertical: vertical || null,
+      hskdRequired: hskd_required ?? false,
+      sourceEvent: "ghl_provision_received",
+      rawPayload: req.body,
+    });
 
-    let userId: string;
-    let created = false;
-
-    if (existing.rows.length === 0) {
-      const passwordHash = await bcrypt.hash(temporary_pass, 10);
-
-      const result = await pool.query(
-        `INSERT INTO users (
-          email,
-          password_hash,
-          role,
-          ghl_contact_id,
-          ghl_location_id,
-          plan_tier,
-          vertical,
-          hskd_required,
-          first_name,
-          last_name,
-          activated_at
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
-        RETURNING id`,
-        [
-          email,
-          passwordHash,
-          "client_admin",
-          contact_id,
-          location_id,
-          plan_tier,
-          vertical,
-          hskd_required ?? false,
-          first_name,
-          last_name,
-        ]
-      );
-
-      userId = result.rows[0].id;
-      created = true;
-    } else {
-      userId = existing.rows[0].id;
-    }
-
-    // Log sync event
-    await pool.query(
-      `INSERT INTO sync_events (
-        entity_type,
-        entity_id,
-        event_type,
-        payload_json,
-        status
-      )
-      VALUES ($1,$2,$3,$4,$5)`,
-      ["user", userId, "ghl_provision_received", req.body, "success"]
-    );
-
-    // Mark webhook log processed — use captured id, not ORDER BY (race-condition fix)
     await pool.query(
       `UPDATE webhook_log SET processed = true WHERE id = $1`,
       [webhookLogId]
     );
 
     return res.status(200).json({
-      message: created ? "User created" : "User already exists",
-      userId,
-      created,
+      message: result.created ? "User created" : "User updated",
+      userId: result.userId,
+      created: result.created,
     });
   } catch (error) {
     console.error("Webhook error:", error);
 
-    // Mark webhook log as failed if we have its id
     if (webhookLogId) {
       await pool.query(
         `UPDATE webhook_log SET error = $1 WHERE id = $2`,
@@ -780,7 +879,7 @@ app.post("/api/progress/module-2/complete", requireAuth(), async (req: AuthReque
         console.log("Tagging contact:", user.ghl_contact_id);
         console.log("Adding tag: module2_complete");
         await addTagToContact(user.ghl_contact_id, "module2_complete");
-
+        console.log("MODULE 2 CUSTOM FIELD SYNC VERSION LIVE");
         await updateContactCustomFields(user.ghl_contact_id, [
           {
             key: "universe_module_2_status",
@@ -905,134 +1004,55 @@ app.post("/api/progress/module-3/complete", requireAuth(), async (req: AuthReque
 app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response) => {
   try {
     const secret = req.header("x-wibiz-secret");
-
     if (!secret || secret !== process.env.GHL_WEBHOOK_SECRET) {
       return res.status(401).json({ error: "Invalid webhook secret" });
     }
 
     const {
       contactId,
-      opportunityId,
-      stageId,
-      stageName,
+      contact_id,
       email,
       firstName,
+      first_name,
       lastName,
-      enrollmentFee,
-      monthlyFee,
+      last_name,
       locationId,
+      location_id,
       planTier,
+      plan_tier,
+      vertical,
+      hskdRequired,
+      hskd_required,
     } = req.body || {};
 
-    if (!contactId || !email) {
-      return res.status(400).json({ error: "contactId and email are required" });
+    const finalContactId = contactId || contact_id;
+    const finalFirstName = firstName || first_name;
+    const finalLastName = lastName || last_name;
+    const finalLocationId = locationId || location_id;
+    const finalPlanTier = planTier || plan_tier;
+    const finalHskdRequired = hskdRequired ?? hskd_required ?? false;
+
+    if (!finalContactId || !email) {
+      return res.status(400).json({ error: "contactId/contact_id and email are required" });
     }
 
-    // fallback defaults for now
-    const finalPlanTier = planTier || "lite";
-    const finalLocationId = locationId || "default-location";
-    const temporaryPass = "TempPass123!";
-
-    const existing = await pool.query(
-      `SELECT id FROM users WHERE ghl_contact_id = $1 LIMIT 1`,
-      [contactId]
-    );
-
-    let userId: string;
-    let created = false;
-
-    if (existing.rows.length === 0) {
-      const passwordHash = await bcrypt.hash(temporaryPass, 10);
-
-      const result = await pool.query(
-        `INSERT INTO users (
-          email,
-          password_hash,
-          role,
-          ghl_contact_id,
-          ghl_location_id,
-          plan_tier,
-          vertical,
-          hskd_required,
-          first_name,
-          last_name,
-          activated_at
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
-        RETURNING id`,
-        [
-          email,
-          passwordHash,
-          "client_admin",
-          contactId,
-          finalLocationId,
-          finalPlanTier,
-          "business",
-          false,
-          firstName || "",
-          lastName || "",
-        ]
-      );
-
-      userId = result.rows[0].id;
-      created = true;
-    } else {
-      userId = existing.rows[0].id;
-
-      await pool.query(
-        `UPDATE users
-         SET email = $1,
-             first_name = $2,
-             last_name = $3,
-             plan_tier = $4,
-             ghl_location_id = $5,
-             updated_at = NOW()
-         WHERE id = $6`,
-        [
-          email,
-          firstName || "",
-          lastName || "",
-          finalPlanTier,
-          finalLocationId,
-          userId,
-        ]
-      );
-    }
-
-    await pool.query(
-      `INSERT INTO sync_events (
-        entity_type,
-        entity_id,
-        event_type,
-        payload_json,
-        status
-      )
-      VALUES ($1,$2,$3,$4,$5)`,
-      [
-        "user",
-        userId,
-        "ghl_payment_success",
-        {
-          contactId,
-          opportunityId,
-          stageId,
-          stageName,
-          email,
-          firstName,
-          lastName,
-          enrollmentFee,
-          monthlyFee,
-          locationId: finalLocationId,
-          planTier: finalPlanTier,
-        },
-        "success",
-      ]
-    );
+    const result = await upsertUserFromGhl({
+      contactId: finalContactId,
+      email,
+      firstName: finalFirstName,
+      lastName: finalLastName,
+      locationId: finalLocationId,
+      planTier: finalPlanTier,
+      vertical: vertical || null,
+      hskdRequired: finalHskdRequired,
+      sourceEvent: "ghl_payment_success",
+      rawPayload: req.body,
+    });
 
     return res.status(200).json({
-      message: created ? "User created from payment workflow" : "User updated from payment workflow",
-      userId,
-      created,
+      message: result.created ? "User created from payment webhook" : "User updated from payment webhook",
+      userId: result.userId,
+      created: result.created,
     });
   } catch (error) {
     console.error("Payment webhook error:", error);
