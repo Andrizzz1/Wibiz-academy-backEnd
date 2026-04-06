@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { pool } from "./db";
 
@@ -37,7 +38,31 @@ interface AuthRequest extends Request {
 //   requireAuth()              → any authenticated user
 //   requireAuth(["wibiz_admin"]) → admin only
 // ─────────────────────────────────────────────
+function generateActivationToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
 
+async function hashToken(token: string) {
+  return bcrypt.hash(token, 10);
+}
+
+async function createActivationToken(userId: string) {
+  const rawToken = generateActivationToken();
+  const tokenHash = await hashToken(rawToken);
+
+  const expiresAt = new Date(Date.now() + 1000 * 60 * 60 * 24); // 24 hours
+
+  await pool.query(
+    `INSERT INTO activation_tokens (user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3)`,
+    [userId, tokenHash, expiresAt]
+  );
+
+  return {
+    rawToken,
+    expiresAt,
+  };
+}
 function requireAuth(roles: string[] = []) {
   return (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
@@ -137,6 +162,23 @@ function randomTempPassword(length = 16) {
   }
   return out;
 }
+async function issueActivationForUser(userId: string, email: string) {
+  await pool.query(
+    `DELETE FROM activation_tokens
+     WHERE user_id = $1 AND used_at IS NULL`,
+    [userId]
+  );
+
+  const { rawToken, expiresAt } = await createActivationToken(userId);
+
+  const activationLink =
+    `${process.env.FRONTEND_URL}/activate.html?token=${encodeURIComponent(rawToken)}&email=${encodeURIComponent(email)}`;
+
+  console.log("ACTIVATION LINK:", activationLink);
+  console.log("EXPIRES AT:", expiresAt.toISOString());
+
+  return { activationLink, expiresAt };
+}
 
 async function upsertUserFromGhl(payload: {
   contactId: string;
@@ -163,6 +205,7 @@ async function upsertUserFromGhl(payload: {
     rawPayload,
   } = payload;
 
+  const normalizedEmail = email.toLowerCase().trim();
   const finalPlanTier = normalizePlanTier(planTier);
   const finalLocationId = locationId || process.env.GHL_LOCATION_ID || null;
 
@@ -171,18 +214,17 @@ async function upsertUserFromGhl(payload: {
   }
 
   const existing = await pool.query(
-    `SELECT id FROM users WHERE ghl_contact_id = $1 LIMIT 1`,
+    `SELECT id, is_active, activated_at, password_hash
+     FROM users
+     WHERE ghl_contact_id = $1
+     LIMIT 1`,
     [contactId]
   );
 
   let userId: string;
   let created = false;
-  let tempPassword: string | null = null;
 
   if (existing.rows.length === 0) {
-    tempPassword = randomTempPassword();
-    const passwordHash = await bcrypt.hash(tempPassword, 10);
-
     const result = await pool.query(
       `INSERT INTO users (
         email,
@@ -197,14 +239,15 @@ async function upsertUserFromGhl(payload: {
         last_name,
         is_active,
         activated_at,
+        portal_status,
         created_at,
         updated_at
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW(),NOW())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),NOW())
       RETURNING id`,
       [
-        email.toLowerCase().trim(),
-        passwordHash,
+        normalizedEmail,
+        null,                 // no password yet
         "client_admin",
         contactId,
         finalLocationId,
@@ -213,7 +256,9 @@ async function upsertUserFromGhl(payload: {
         hskdRequired ?? false,
         firstName || "",
         lastName || "",
-        true,
+        false,                // not active until activation
+        null,                 // not activated yet
+        "pending",            // requires portal_status column
       ]
     );
 
@@ -231,11 +276,10 @@ async function upsertUserFromGhl(payload: {
            plan_tier = $5,
            vertical = $6,
            hskd_required = $7,
-           is_active = true,
            updated_at = NOW()
        WHERE id = $8`,
       [
-        email.toLowerCase().trim(),
+        normalizedEmail,
         firstName || "",
         lastName || "",
         finalLocationId,
@@ -262,7 +306,6 @@ async function upsertUserFromGhl(payload: {
   return {
     userId,
     created,
-    tempPassword,
   };
 }
 
@@ -374,8 +417,12 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
 
     const user = result.rows[0];
 
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is inactive" });
+   if (!user.is_active || user.portal_status === "pending") {
+      return res.status(403).json({ error: "Account is not activated yet" });
+    }
+
+    if (!user.password_hash) {
+      return res.status(403).json({ error: "Account is not activated yet" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
@@ -1049,6 +1096,11 @@ app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response
       rawPayload: req.body,
     });
 
+    const activation = await issueActivationForUser(
+      result.userId,
+      email
+    );
+
     return res.status(200).json({
       message: result.created ? "User created from payment webhook" : "User updated from payment webhook",
       userId: result.userId,
@@ -1060,7 +1112,153 @@ app.post("/api/webhooks/ghl/payment-success", async (req: Request, res: Response
   }
 });
 
+app.post("/api/auth/activate", async (req: Request, res: Response) => {
+  try {
+    const { email, token, password } = req.body || {};
 
+    if (!email || !token || !password) {
+      return res.status(400).json({ error: "email, token, and password are required" });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
+    }
+
+    const userResult = await pool.query(
+      `SELECT id, email, is_active, portal_status
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [email.toLowerCase().trim()]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const user = userResult.rows[0];
+
+    const tokenResult = await pool.query(
+      `SELECT id, token_hash, expires_at, used_at
+       FROM activation_tokens
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 10`,
+      [user.id]
+    );
+
+    if (tokenResult.rows.length === 0) {
+      return res.status(400).json({ error: "No activation token found" });
+    }
+
+    let matchedToken: any = null;
+
+    for (const row of tokenResult.rows) {
+      if (row.used_at) continue;
+      if (new Date(row.expires_at).getTime() < Date.now()) continue;
+
+      const ok = await bcrypt.compare(token, row.token_hash);
+      if (ok) {
+        matchedToken = row;
+        break;
+      }
+    }
+
+    if (!matchedToken) {
+      return res.status(400).json({ error: "Invalid or expired activation token" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await pool.query("BEGIN");
+
+    await pool.query(
+      `UPDATE users
+       SET password_hash = $1,
+           is_active = true,
+           portal_status = 'active',
+           activated_at = NOW(),
+           first_login_completed = true,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [passwordHash, user.id]
+    );
+
+    await pool.query(
+      `UPDATE activation_tokens
+       SET used_at = NOW()
+       WHERE id = $1`,
+      [matchedToken.id]
+    );
+
+    await pool.query(
+      `INSERT INTO sync_events (
+        entity_type,
+        entity_id,
+        event_type,
+        payload_json,
+        status
+      )
+      VALUES ($1,$2,$3,$4,$5)`,
+      [
+        "user",
+        user.id,
+        "account_activated",
+        { email: user.email },
+        "success"
+      ]
+    );
+
+    await pool.query("COMMIT");
+
+    return res.status(200).json({
+      message: "Account activated successfully"
+    });
+  } catch (error) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("Activate error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+app.post("/api/ghl/webhook", async (req, res) => {
+  try {
+    console.log("📩 GHL Webhook Received:", req.body);
+
+    const payload = req.body;
+
+    // Extract basic fields (we'll improve later)
+    const contactId = payload.contact?.id;
+    const email = payload.contact?.email;
+    const firstName = payload.contact?.firstName;
+    const lastName = payload.contact?.lastName;
+    const locationId = payload.locationId;
+
+    if (!contactId || !email) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    const result = await upsertUserFromGhl({
+      contactId,
+      email,
+      firstName,
+      lastName,
+      locationId,
+      planTier: "lite", // temp (we improve later)
+      vertical: null,
+      hskdRequired: false,
+      sourceEvent: "ghl_webhook",
+      rawPayload: payload
+    });
+
+    console.log("✅ User synced:", result);
+
+    res.json({ success: true });
+
+  } catch (err) {
+    console.error("❌ Webhook error:", err);
+    res.status(500).json({ error: "Webhook failed" });
+  }
+});
 
 // ─────────────────────────────────────────────
 // SERVER START
