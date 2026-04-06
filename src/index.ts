@@ -1226,15 +1226,45 @@ app.post("/api/ghl/webhook", async (req, res) => {
 
     const payload = req.body;
 
-    // Extract basic fields (we'll improve later)
-    const contactId = payload.contact?.id;
-    const email = payload.contact?.email;
-    const firstName = payload.contact?.firstName;
-    const lastName = payload.contact?.lastName;
-    const locationId = payload.locationId;
+    const contactId =
+      payload?.customData?.contact_id ||
+      payload?.contact_id ||
+      payload?.contact?.id ||
+      null;
+
+    const email =
+      payload?.customData?.email ||
+      payload?.email ||
+      payload?.contact?.email ||
+      null;
+
+    const firstName =
+      payload?.customData?.firstName ||
+      payload?.firstName ||
+      payload?.contact?.firstName ||
+      payload?.contact?.first_name ||
+      "";
+
+    const lastName =
+      payload?.customData?.lastName ||
+      payload?.lastName ||
+      payload?.contact?.lastName ||
+      payload?.contact?.last_name ||
+      "";
+
+    const locationId =
+      payload?.customData?.locationId ||
+      payload?.locationId ||
+      payload?.location?.id ||
+      process.env.GHL_LOCATION_ID ||
+      null;
 
     if (!contactId || !email) {
-      return res.status(400).json({ error: "Missing required fields" });
+      return res.status(400).json({
+        error: "Missing required fields",
+        contactId,
+        email
+      });
     }
 
     const result = await upsertUserFromGhl({
@@ -1243,7 +1273,7 @@ app.post("/api/ghl/webhook", async (req, res) => {
       firstName,
       lastName,
       locationId,
-      planTier: "lite", // temp (we improve later)
+      planTier: "lite",
       vertical: null,
       hskdRequired: false,
       sourceEvent: "ghl_webhook",
@@ -1252,11 +1282,14 @@ app.post("/api/ghl/webhook", async (req, res) => {
 
     console.log("✅ User synced:", result);
 
-    res.json({ success: true });
+    return res.json({
+      success: true,
+      result
+    });
 
   } catch (err) {
     console.error("❌ Webhook error:", err);
-    res.status(500).json({ error: "Webhook failed" });
+    return res.status(500).json({ error: "Webhook failed" });
   }
 });
 
